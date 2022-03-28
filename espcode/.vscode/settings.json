@@ -6,5 +6,9 @@
     "target/esp32.cfg"
   ],
   "idf.port": "/dev/ttyUSB0",
-  "idf.portWin": "COM5"
+  "idf.portWin": "COM5",
+  "files.associations": {
+    "queue.h": "c",
+    "freertos.h": "c"
+  }
 }
