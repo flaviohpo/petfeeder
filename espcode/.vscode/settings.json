@@ -5,5 +5,12 @@
     "interface/ftdi/esp32_devkitj_v1.cfg",
     "target/esp32.cfg"
   ],
-  "idf.port": "/dev/ttyUSB0"
+  "idf.port": "/dev/ttyUSB0",
+  "files.associations": {
+    "complex": "c",
+    "*.inc": "c",
+    "cstring": "c",
+    "typeinfo": "c"
+  },
+  "idf.portWin": "COM5"
 }

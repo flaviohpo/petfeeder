@@ -24,9 +24,10 @@
 #include "sdkconfig.h"
 
 #include "esp_system.h"
+#include "esp_log.h"
 #include "esp_wifi.h"
 #include "esp_event.h"
-#include "esp_log.h"
+#include "esp_http_client.h"
 
 #include "nvs_flash.h"
 #include "lwip/err.h"
@@ -34,7 +35,30 @@
 
 #include "../secrets.h"
 
-static const char *TAG = "MAIN";
+///////////////////////////////////////////////////
+////////// DEFINES ////////////////////////////////
+///////////////////////////////////////////////////
+/* Use project configuration menu (idf.py menuconfig) to choose the GPIO to blink,
+   or you can edit the following line and set a number here.
+*/
+#define BLINK_GPIO CONFIG_BLINK_GPIO
+#define EXAMPLE_ESP_MAXIMUM_RETRY  3
+
+//// related to the step motor
+#define PIN_STEP        12
+#define PIN_DIR         13
+#define PIN_EN          25
+#define START_FREQ      300
+
+/* The event group allows multiple bits for each event, but we only care about two events:
+ * - we are connected to the AP with an IP
+ * - we failed to connect after the maximum amount of retries */
+#define WIFI_CONNECTED_BIT BIT0
+#define WIFI_FAIL_BIT      BIT1
+
+///////////////////////////////////////////////////
+////////// CUSTOM TYPES ///////////////////////////
+///////////////////////////////////////////////////
 
 /**
  * @brief Time eh o tempo que vai ficar ligado
@@ -46,18 +70,74 @@ typedef struct
     uint8_t Break;  // 1 = break, 0 = release
 }MOTOR_INSTR_ts;
 
-QueueHandle_t QueueMotor;
+typedef struct
+{
+    uint32_t Hora;
+    uint32_t Min;
+    uint32_t Seg;
+}CLOCK_ts;
 
-/* Use project configuration menu (idf.py menuconfig) to choose the GPIO to blink,
-   or you can edit the following line and set a number here.
-*/
-#define BLINK_GPIO CONFIG_BLINK_GPIO
+///////////////////////////////////////////////////
+////////// VARIABLES //////////////////////////////
+///////////////////////////////////////////////////
 
 static uint8_t s_led_state = 0;
+QueueHandle_t QueueMotor;
+static const char *TAG = "MAIN";
+/* FreeRTOS event group to signal when we are connected*/
+static EventGroupHandle_t s_wifi_event_group;
+static int s_retry_num = 0;
+CLOCK_ts MainClock = {0};
 
+///////////////////////////////////////////////////
+////////// DECLARATIONS ///////////////////////////
+///////////////////////////////////////////////////
+
+///////////////////////////////////////////////////
+/////////// WIFI AND CLIENT REQUESTS //////////////
+///////////////////////////////////////////////////
 void wifi_routine(void);
+void wifi_init_sta(void);
+
+void http_time_request(void);
+esp_err_t time_api_client_event_handler(esp_http_client_event_t *evt);
+
+static void blink_led(void);
+static void configure_led(void);
+
+void task_step_motor(void* pv);
+void configure_step_motor(void);
+static void seconds_callback(void* arg);
+
+///////////////////////////////////////////////////
+////////// PROTOTYPES /////////////////////////////
+///////////////////////////////////////////////////
+void clock_update(void)
+{
+    MainClock.Seg++;
+    if(MainClock.Seg >= 60)
+    {
+        MainClock.Seg = 0;
+        MainClock.Min++;
+        if(MainClock.Min >= 60)
+        {
+            MainClock.Hora++;
+            if(MainClock.Hora >= 24)
+            {
+                MainClock.Hora = 0;
+            }
+        }
+    }
+}
+
+static void seconds_callback(void* arg)
+{
+    clock_update();
+    ESP_LOGW(TAG, "Time=%02d:%02d:%02d", MainClock.Hora, MainClock.Min, MainClock.Seg);
+}
 
 static void blink_led(void)
+
 {
     /* Set the GPIO level according to the state (LOW or HIGH)*/
     gpio_set_level(BLINK_GPIO, s_led_state);
@@ -71,10 +151,6 @@ static void configure_led(void)
     gpio_set_direction(BLINK_GPIO, GPIO_MODE_OUTPUT);
 }
 
-#define PIN_STEP        12
-#define PIN_DIR         13
-#define PIN_EN          25
-#define START_FREQ      300
 void configure_step_motor(void)
 {
     ESP_ERROR_CHECK(mcpwm_gpio_init(0, MCPWM0A, PIN_STEP));
@@ -121,7 +197,8 @@ void task_step_motor(void* pv)
 void app_main(void)
 {
     MOTOR_INSTR_ts Instruction = {5, 0};
-
+    const esp_timer_create_args_t seconds_args = {.callback=&seconds_callback, .name="update MainClock"};
+    esp_timer_handle_t seconds_timer;
     QueueMotor = xQueueCreate(10, sizeof (MOTOR_INSTR_ts));
 
     /* Configure the peripheral according to the LED type */
@@ -134,49 +211,21 @@ void app_main(void)
 
     wifi_routine();
 
+    ESP_ERROR_CHECK(esp_timer_create(&seconds_args, &seconds_timer));
+    ESP_ERROR_CHECK(esp_timer_start_periodic(seconds_timer, 1000000)); // microseconds
+
     while (1) 
     {
         blink_led();
         /* Toggle the LED state */
         s_led_state = !s_led_state;
-        vTaskDelay(CONFIG_BLINK_PERIOD / portTICK_PERIOD_MS);
+        vTaskDelay(CONFIG_BLINK_PERIOD / portTICK_PERIOD_MS / 2);
     }
 }
 
-///////////////////////////////////////////
-///////// WIFI REQUESTS
-#define EXAMPLE_ESP_MAXIMUM_RETRY  3
-
-#if CONFIG_ESP_WIFI_AUTH_OPEN
-#define ESP_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_OPEN
-#elif CONFIG_ESP_WIFI_AUTH_WEP
-#define ESP_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_WEP
-#elif CONFIG_ESP_WIFI_AUTH_WPA_PSK
-#define ESP_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_WPA_PSK
-#elif CONFIG_ESP_WIFI_AUTH_WPA2_PSK
-#define ESP_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_WPA2_PSK
-#elif CONFIG_ESP_WIFI_AUTH_WPA_WPA2_PSK
-#define ESP_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_WPA_WPA2_PSK
-#elif CONFIG_ESP_WIFI_AUTH_WPA3_PSK
-#define ESP_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_WPA3_PSK
-#elif CONFIG_ESP_WIFI_AUTH_WPA2_WPA3_PSK
-#define ESP_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_WPA2_WPA3_PSK
-#elif CONFIG_ESP_WIFI_AUTH_WAPI_PSK
-#define ESP_WIFI_SCAN_AUTH_MODE_THRESHOLD WIFI_AUTH_WAPI_PSK
-#endif
-
-/* FreeRTOS event group to signal when we are connected*/
-static EventGroupHandle_t s_wifi_event_group;
-
-/* The event group allows multiple bits for each event, but we only care about two events:
- * - we are connected to the AP with an IP
- * - we failed to connect after the maximum amount of retries */
-#define WIFI_CONNECTED_BIT BIT0
-#define WIFI_FAIL_BIT      BIT1
-
-static int s_retry_num = 0;
-
-
+////////////////////////////////////////
+/////// WIFI CONNECTION ////////////////
+////////////////////////////////////////
 static void event_handler(void* arg, esp_event_base_t event_base,
                                 int32_t event_id, void* event_data)
 {
@@ -276,6 +325,9 @@ void wifi_init_sta(void)
     }
 }
 
+////////////////////////////////////////
+////////////////////////////////////////
+////////////////////////////////////////
 void wifi_routine(void)
 {
     //Initialize NVS
@@ -289,17 +341,71 @@ void wifi_routine(void)
 
     ESP_LOGI(TAG, "ESP_WIFI_MODE_STA");
     wifi_init_sta();
+
+    http_time_request();
 }
 
+////////////////////////////////////////
+////////// WIFI REQUESTS ///////////////
+////////////////////////////////////////
 void http_time_request(void)
 {
-    last_request = WIFI_REQUEST_HEXA_SERVER_GET_FIRM_VERSION;
     esp_http_client_config_t client_config = 
     {
-        .url = "http://127.0.0.1:5000/firmware_version",
-        .event_handler = my_wifi_client_event_handler
+        .url = "http://worldtimeapi.org/api/timezone/America/Sao_Paulo",
+        .event_handler = time_api_client_event_handler
     };
     esp_http_client_handle_t client = esp_http_client_init(&client_config);
     esp_http_client_perform(client);
     esp_http_client_cleanup(client);
+}
+
+////////////////////////////////////////
+////////// WIFI CALLBACKS //////////////
+////////////////////////////////////////
+esp_err_t time_api_client_event_handler(esp_http_client_event_t *evt)
+{
+    char* datetime_ptr;
+    switch (evt->event_id)
+    {
+        case HTTP_EVENT_ERROR:
+            ESP_LOGI("HTTP CLIENT", "HTTP_EVENT_ERROR\n");
+        break;
+
+        case HTTP_EVENT_ON_CONNECTED:
+            ESP_LOGI("HTTP CLIENT", "HTTP_EVENT_ON_CONNECTED\n");
+        break;
+
+        case HTTP_EVENT_HEADERS_SENT:
+            ESP_LOGI("HTTP CLIENT", "HTTP_EVENT_HEADERS_SENT\n");
+        break;
+
+        case HTTP_EVENT_ON_HEADER:
+            ESP_LOGI("HTTP CLIENT", "HTTP_EVENT_ON_HEADER: key=%s value=%s\n", evt->header_key, evt->header_value);
+        break;
+
+        case HTTP_EVENT_ON_DATA:
+            ESP_LOGI("HTTP CLIENT", "HTTP_EVENT_ON_DATA: data=%s len=%d", (char*)evt->data, evt->data_len);
+            datetime_ptr = strstr((char*)evt->data, "\"datetime\":\"");
+            printf("\n\n%s\n", datetime_ptr);
+            MainClock.Hora = (datetime_ptr[23] - 48) * 10 + (datetime_ptr[24] - 48);
+            MainClock.Min = (datetime_ptr[26] - 48) * 10 + (datetime_ptr[27] - 48);
+            MainClock.Seg = (datetime_ptr[29] - 48) * 10 + (datetime_ptr[30] - 48);
+            printf("Time=%02d:%02d:%02d\n", MainClock.Hora, MainClock.Min, MainClock.Seg);
+        break;
+
+        case HTTP_EVENT_ON_FINISH:
+            ESP_LOGI("HTTP CLIENT", "HTTP_EVENT_ON_FINISH");
+        break;
+
+        case HTTP_EVENT_DISCONNECTED:
+            ESP_LOGI("HTTP CLIENT", "HTTP_EVENT_DISCONNECTED\n");
+        break;
+
+        default:
+            ESP_LOGI("HTTP CLIENT", "EVENTO HTTP NAO TRATADO: %d\n", evt->event_id);
+        break;
+    }
+
+    return ESP_OK;
 }
