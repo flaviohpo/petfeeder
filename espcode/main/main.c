@@ -88,6 +88,8 @@ static const char *TAG = "MAIN";
 static EventGroupHandle_t s_wifi_event_group;
 static int s_retry_num = 0;
 CLOCK_ts MainClock = {0};
+CLOCK_ts FeedClockStart = {0};
+CLOCK_ts FeedClockEnd = {0};
 
 ///////////////////////////////////////////////////
 ////////// DECLARATIONS ///////////////////////////
@@ -100,7 +102,9 @@ void wifi_routine(void);
 void wifi_init_sta(void);
 
 void http_time_request(void);
+void http_feed_request(void);
 esp_err_t time_api_client_event_handler(esp_http_client_event_t *evt);
+esp_err_t feed_value_client_event_handler(esp_http_client_event_t *evt);
 
 static void blink_led(void);
 static void configure_led(void);
@@ -285,8 +289,8 @@ void wifi_init_sta(void)
     {
         .sta = 
         {
-            .ssid = EXAMPLE_ESP_WIFI_SSID,
-            .password = EXAMPLE_ESP_WIFI_PASS,
+            .ssid = WIFI_SSID,
+            .password = WIFI_PASS,
             /* Setting a password implies station will connect to all security modes including WEP/WPA.
              * However these modes are deprecated and not advisable to be used. Incase your Access point
              * doesn't support WPA2, these mode can be enabled by commenting below line */
@@ -312,12 +316,12 @@ void wifi_init_sta(void)
     if (bits & WIFI_CONNECTED_BIT) 
     {
         ESP_LOGI(TAG, "connected to ap SSID:%s password:%s",
-                 EXAMPLE_ESP_WIFI_SSID, EXAMPLE_ESP_WIFI_PASS);
+                 WIFI_SSID, WIFI_PASS);
     } 
     else if (bits & WIFI_FAIL_BIT) 
     {
         ESP_LOGI(TAG, "Failed to connect to SSID:%s, password:%s",
-                 EXAMPLE_ESP_WIFI_SSID, EXAMPLE_ESP_WIFI_PASS);
+                 WIFI_SSID, WIFI_PASS);
     } 
     else 
     {
@@ -343,6 +347,10 @@ void wifi_routine(void)
     wifi_init_sta();
 
     http_time_request();
+
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+
+    http_feed_request();
 }
 
 ////////////////////////////////////////
@@ -354,6 +362,18 @@ void http_time_request(void)
     {
         .url = "http://worldtimeapi.org/api/timezone/America/Sao_Paulo",
         .event_handler = time_api_client_event_handler
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&client_config);
+    esp_http_client_perform(client);
+    esp_http_client_cleanup(client);
+}
+
+void http_feed_request(void)
+{
+    esp_http_client_config_t client_config = 
+    {           
+        .url = "http://127.0.0.1:5000/get_value",
+        .event_handler = feed_value_client_event_handler
     };
     esp_http_client_handle_t client = esp_http_client_init(&client_config);
     esp_http_client_perform(client);
@@ -392,6 +412,59 @@ esp_err_t time_api_client_event_handler(esp_http_client_event_t *evt)
             MainClock.Min = (datetime_ptr[26] - 48) * 10 + (datetime_ptr[27] - 48);
             MainClock.Seg = (datetime_ptr[29] - 48) * 10 + (datetime_ptr[30] - 48);
             printf("Time=%02d:%02d:%02d\n", MainClock.Hora, MainClock.Min, MainClock.Seg);
+        break;
+
+        case HTTP_EVENT_ON_FINISH:
+            ESP_LOGI("HTTP CLIENT", "HTTP_EVENT_ON_FINISH");
+        break;
+
+        case HTTP_EVENT_DISCONNECTED:
+            ESP_LOGI("HTTP CLIENT", "HTTP_EVENT_DISCONNECTED\n");
+        break;
+
+        default:
+            ESP_LOGI("HTTP CLIENT", "EVENTO HTTP NAO TRATADO: %d\n", evt->event_id);
+        break;
+    }
+
+    return ESP_OK;
+}
+
+esp_err_t feed_value_client_event_handler(esp_http_client_event_t *evt)
+{
+    char* datetime_ptr;
+    switch (evt->event_id)
+    {
+        case HTTP_EVENT_ERROR:
+            ESP_LOGI("HTTP CLIENT", "HTTP_EVENT_ERROR\n");
+        break;
+
+        case HTTP_EVENT_ON_CONNECTED:
+            ESP_LOGI("HTTP CLIENT", "HTTP_EVENT_ON_CONNECTED\n");
+        break;
+
+        case HTTP_EVENT_HEADERS_SENT:
+            ESP_LOGI("HTTP CLIENT", "HTTP_EVENT_HEADERS_SENT\n");
+        break;
+
+        case HTTP_EVENT_ON_HEADER:
+            ESP_LOGI("HTTP CLIENT", "HTTP_EVENT_ON_HEADER: key=%s value=%s\n", evt->header_key, evt->header_value);
+            if(strcmp(evt->header_key, "horario_inicio") == 0)
+            {
+                FeedClockStart.Hora = (evt->header_value[0] - 48) * 10 + (evt->header_value[1] - 48);
+                FeedClockStart.Min = (evt->header_value[3] - 48) * 10 + (evt->header_value[4] - 48);
+                FeedClockStart.Seg = (evt->header_value[6] - 48) * 10 + (evt->header_value[7] - 48);
+            }
+            if(strcmp(evt->header_key, "horario_fim") == 0)
+            {
+                FeedClockEnd.Hora = (evt->header_value[0] - 48) * 10 + (evt->header_value[1] - 48);
+                FeedClockEnd.Min = (evt->header_value[3] - 48) * 10 + (evt->header_value[4] - 48);
+                FeedClockEnd.Seg = (evt->header_value[6] - 48) * 10 + (evt->header_value[7] - 48);
+            }
+        break;
+
+        case HTTP_EVENT_ON_DATA:
+            ESP_LOGI("HTTP CLIENT", "HTTP_EVENT_ON_DATA: data=%s len=%d", (char*)evt->data, evt->data_len);
         break;
 
         case HTTP_EVENT_ON_FINISH:
