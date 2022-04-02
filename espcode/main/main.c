@@ -33,6 +33,8 @@
 #include "lwip/err.h"
 #include "lwip/sys.h"
 
+#include "my_clock.h"
+
 #include "../secrets.h"
 
 ///////////////////////////////////////////////////
@@ -48,7 +50,7 @@
 #define PIN_STEP        12
 #define PIN_DIR         13
 #define PIN_EN          25
-#define START_FREQ      300
+#define START_FREQ      500
 
 /* The event group allows multiple bits for each event, but we only care about two events:
  * - we are connected to the AP with an IP
@@ -56,6 +58,7 @@
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT      BIT1
 
+char* NGROK_URL = "http://196d-179-180-191-123.ngrok.io";
 ///////////////////////////////////////////////////
 ////////// CUSTOM TYPES ///////////////////////////
 ///////////////////////////////////////////////////
@@ -69,13 +72,6 @@ typedef struct
     uint32_t Time; // in seconds
     uint8_t Break;  // 1 = break, 0 = release
 }MOTOR_INSTR_ts;
-
-typedef struct
-{
-    uint32_t Hora;
-    uint32_t Min;
-    uint32_t Seg;
-}CLOCK_ts;
 
 ///////////////////////////////////////////////////
 ////////// VARIABLES //////////////////////////////
@@ -113,30 +109,14 @@ void task_step_motor(void* pv);
 void configure_step_motor(void);
 static void seconds_callback(void* arg);
 
+void check_for_feed_time(void);
+
 ///////////////////////////////////////////////////
 ////////// PROTOTYPES /////////////////////////////
 ///////////////////////////////////////////////////
-void clock_update(void)
-{
-    MainClock.Seg++;
-    if(MainClock.Seg >= 60)
-    {
-        MainClock.Seg = 0;
-        MainClock.Min++;
-        if(MainClock.Min >= 60)
-        {
-            MainClock.Hora++;
-            if(MainClock.Hora >= 24)
-            {
-                MainClock.Hora = 0;
-            }
-        }
-    }
-}
-
 static void seconds_callback(void* arg)
 {
-    clock_update();
+    clock_update(&MainClock);
     ESP_LOGW(TAG, "Time=%02d:%02d:%02d", MainClock.Hora, MainClock.Min, MainClock.Seg);
 }
 
@@ -175,11 +155,13 @@ void configure_step_motor(void)
 
 void task_step_motor(void* pv)
 {
-    static MOTOR_INSTR_ts Instruction = {0};
+    static MOTOR_INSTR_ts Instruction = {0, 0};
     configure_step_motor();
     while(true)
     {
         xQueueReceive(QueueMotor, &Instruction, portMAX_DELAY);
+        printf("Time=%02d:%02d:%02d -> ", MainClock.Hora, MainClock.Min, MainClock.Seg);
+        ESP_LOGI(TAG, "INICIO FUNCIONAMENTO.");
         if(Instruction.Time > 0)
         {
             ESP_ERROR_CHECK(gpio_set_level(PIN_EN, 0));
@@ -194,13 +176,57 @@ void task_step_motor(void* pv)
         {
             ESP_ERROR_CHECK(gpio_set_level(PIN_EN, 1));
         }
+        printf("Time=%02d:%02d:%02d -> ", MainClock.Hora, MainClock.Min, MainClock.Seg);
+        ESP_LOGI(TAG, "FIM FUNCIONAMENTO.");
         ESP_ERROR_CHECK(mcpwm_set_duty(0, MCPWM_TIMER_0, MCPWM_OPR_A, 0));
     }
 }
 
+void check_for_feed_time(void)
+{
+    #define STATE_FEED_IDLE             0
+    #define STATE_FEED_WAIT_NEXT_DAY    1
+
+    #define CLOCK_MENOR                 -1
+    #define CLOCK_IGUAL                 0
+    #define CLOCK_MAIOR                 1
+
+    static uint8_t state = STATE_FEED_IDLE;
+    uint32_t TimeDiff;
+    static MOTOR_INSTR_ts Instruction = {0, 0};
+
+    switch(state)
+    { 
+        case STATE_FEED_IDLE:
+            if(clock_compare(&MainClock, &FeedClockStart) == CLOCK_MAIOR )
+            {
+                if(clock_compare(&MainClock, &FeedClockEnd) == CLOCK_MENOR)
+                {
+                    TimeDiff = clock_to_seconds(&FeedClockEnd) - clock_to_seconds(&FeedClockStart);
+                    Instruction.Time = TimeDiff;
+                    Instruction.Break = 0;
+                    xQueueSend(QueueMotor, &Instruction, portMAX_DELAY);
+                    state = STATE_FEED_WAIT_NEXT_DAY;
+                    printf("MAIN=%02d:%02d:%02d -> ", MainClock.Hora, MainClock.Min, MainClock.Seg);
+                    printf("FEED=%02d:%02d:%02d -> ", FeedClockStart.Hora, FeedClockStart.Min, FeedClockStart.Seg);
+                    ESP_LOGI(TAG, "STATE_FEED_WAIT_NEXT_DAY");
+                }
+            }
+        break;
+
+        case STATE_FEED_WAIT_NEXT_DAY:
+            if(clock_compare(&MainClock, &FeedClockStart) == CLOCK_MENOR)
+            {
+                state = STATE_FEED_IDLE;
+                printf("Time=%02d:%02d:%02d -> ", MainClock.Hora, MainClock.Min, MainClock.Seg);
+                ESP_LOGI(TAG, "STATE_FEED_IDLE");
+            }
+        break;
+    }    
+}
+
 void app_main(void)
 {
-    MOTOR_INSTR_ts Instruction = {5, 0};
     const esp_timer_create_args_t seconds_args = {.callback=&seconds_callback, .name="update MainClock"};
     esp_timer_handle_t seconds_timer;
     QueueMotor = xQueueCreate(10, sizeof (MOTOR_INSTR_ts));
@@ -210,8 +236,6 @@ void app_main(void)
     
     xTaskCreatePinnedToCore(task_step_motor, "step_motor_driver",
                             4096, (void*)NULL, 4, NULL, 1);
-
-    xQueueSend(QueueMotor, &Instruction, portMAX_DELAY);
 
     wifi_routine();
 
@@ -224,6 +248,8 @@ void app_main(void)
         /* Toggle the LED state */
         s_led_state = !s_led_state;
         vTaskDelay(CONFIG_BLINK_PERIOD / portTICK_PERIOD_MS / 2);
+
+        check_for_feed_time();
     }
 }
 
@@ -356,6 +382,9 @@ void wifi_routine(void)
 ////////////////////////////////////////
 ////////// WIFI REQUESTS ///////////////
 ////////////////////////////////////////
+#define NGROK_URL   "http://b803-2804-7f5-9394-b3ac-210b-37f0-a1e1-61a3.ngrok.io/"
+static char* ngrok_url = NGROK_URL;
+
 void http_time_request(void)
 {
     esp_http_client_config_t client_config = 
@@ -370,14 +399,18 @@ void http_time_request(void)
 
 void http_feed_request(void)
 {
+    char* url = (char*)calloc(1, strlen(ngrok_url) + 50);
+    strcat(url, ngrok_url);
+    strcat(url, "get_value");
     esp_http_client_config_t client_config = 
     {           
-        .url = "http://127.0.0.1:5000/get_value",
+        .url = url,
         .event_handler = feed_value_client_event_handler
     };
     esp_http_client_handle_t client = esp_http_client_init(&client_config);
     esp_http_client_perform(client);
     esp_http_client_cleanup(client);
+    free(url);
 }
 
 ////////////////////////////////////////
@@ -432,7 +465,6 @@ esp_err_t time_api_client_event_handler(esp_http_client_event_t *evt)
 
 esp_err_t feed_value_client_event_handler(esp_http_client_event_t *evt)
 {
-    char* datetime_ptr;
     switch (evt->event_id)
     {
         case HTTP_EVENT_ERROR:
@@ -449,13 +481,13 @@ esp_err_t feed_value_client_event_handler(esp_http_client_event_t *evt)
 
         case HTTP_EVENT_ON_HEADER:
             ESP_LOGI("HTTP CLIENT", "HTTP_EVENT_ON_HEADER: key=%s value=%s\n", evt->header_key, evt->header_value);
-            if(strcmp(evt->header_key, "horario_inicio") == 0)
+            if(strcmp(evt->header_key, "Horario_inicio") == 0)
             {
                 FeedClockStart.Hora = (evt->header_value[0] - 48) * 10 + (evt->header_value[1] - 48);
                 FeedClockStart.Min = (evt->header_value[3] - 48) * 10 + (evt->header_value[4] - 48);
                 FeedClockStart.Seg = (evt->header_value[6] - 48) * 10 + (evt->header_value[7] - 48);
             }
-            if(strcmp(evt->header_key, "horario_fim") == 0)
+            if(strcmp(evt->header_key, "Horario_fim") == 0)
             {
                 FeedClockEnd.Hora = (evt->header_value[0] - 48) * 10 + (evt->header_value[1] - 48);
                 FeedClockEnd.Min = (evt->header_value[3] - 48) * 10 + (evt->header_value[4] - 48);

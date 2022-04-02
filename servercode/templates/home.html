@@ -1,19 +1,18 @@
 {% block conteudo %}
     <form method="POST" action="/set_value">
         <br>
-        <p style="color:red;">PETFEEDER SCHEDULER</p>
+        <p>PETFEEDER SCHEDULER</p>
         <br>
+        <!-- {% for horario in horarios %} -->
         <div>
-            <label
-                 for="Inicio">Incio</label>
+            <label for="Inicio">Incio</label>
             <input 
                 type="text" 
                 value={{text1}} 
                 pattern="[0-9:]{8}" 
                 name="horario_inicio" 
                 class="form-control">
-            <label 
-                for="Fim">Fim</label>
+            <label for="Fim">Fim</label>
             <input 
                 type="text" 
                 value={{text2}} 
@@ -21,6 +20,7 @@
                 name="horario_fim" 
                 class="form-control">
         </div>
+        <!-- {% endfor %} -->
         <br>
         <p><button class="btn btn-primary" type="submit">Set value</button></p>
     </form>   
