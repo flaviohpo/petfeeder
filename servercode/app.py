@@ -1,28 +1,12 @@
 # import the Flask class from the flask module
 from flask import Flask, render_template, request, redirect, Response
+from petfeed import time, feed
 import yaml
 
 with open("parameters.yaml", 'r') as stream:
     parameters = yaml.load(stream, Loader=yaml.SafeLoader)
 
-class time:
-    def __init__(self, hora=0, min=0, seg=0):
-        self.hora = hora
-        self.min = min
-        self.seg = seg
-    def from_string(self, text):
-        '''Sets the values passing a string hh:mm:ss as text'''
-        self.hora = int(text[0:2])
-        self.min = int(text[3:5])
-        self.seg = int(text[6:8])
-    def __str__(self):
-        return f'{self.hora:02d}:{self.min:02d}:{self.seg:02d}'
-
-horario_inicio = time()
-horario_fim = time()
-
-horario_inicio.from_string(parameters['hora_inicio'])
-horario_fim.from_string(parameters['hora_fim'])
+feed = []
 
 # create the application object
 app = Flask(__name__)
